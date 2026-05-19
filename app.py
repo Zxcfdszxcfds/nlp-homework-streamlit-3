@@ -1,10 +1,7 @@
 import streamlit as st
-import spacy
-from spacy.cli import download
 import pandas as pd
 from pyvis.network import Network
 import streamlit.components.v1 as components
-import os
 
 # ---------------------- 页面配置 ----------------------
 st.set_page_config(
@@ -13,51 +10,58 @@ st.set_page_config(
     layout="wide"
 )
 
-# ---------------------- 自动下载spaCy模型 ----------------------
-@st.cache_resource
-def load_spacy_model():
-    # 自动下载模型，避免安装失败
-    try:
-        nlp = spacy.load("en_core_web_sm")
-    except OSError:
-        download("en_core_web_sm")
-        nlp = spacy.load("en_core_web_sm")
-    return nlp
+# ---------------------- 内置实体词典（模拟NER） ----------------------
+ENTITY_DICT = {
+    "PERSON": ["Steve Jobs", "Elon Musk", "Bill Gates", "Tim Cook"],
+    "ORG": ["Apple", "Google", "Microsoft", "Tesla", "Apple Inc."],
+    "GPE": ["Cupertino", "California", "USA", "United States"],
+    "PRODUCT": ["iPhone", "MacBook", "Tesla Model S"]
+}
 
-nlp = load_spacy_model()
-
-# ---------------------- 模块1：NER与BIO标注 ----------------------
 def get_ner_entities(text):
-    doc = nlp(text)
     entities = []
-    for ent in doc.ents:
-        entities.append({
-            "text": ent.text,
-            "start": ent.start_char,
-            "end": ent.end_char,
-            "label": ent.label_
-        })
-    return entities
+    text_lower = text.lower()
+    for label, names in ENTITY_DICT.items():
+        for name in names:
+            name_lower = name.lower()
+            start_idx = text_lower.find(name_lower)
+            while start_idx != -1:
+                entities.append({
+                    "text": name,
+                    "start": start_idx,
+                    "end": start_idx + len(name),
+                    "label": label
+                })
+                start_idx = text_lower.find(name_lower, start_idx + len(name))
+    # 按出现位置倒序排序，避免高亮时的偏移问题
+    return sorted(entities, key=lambda x: x["start"], reverse=True)
 
-def get_bio_tags(text):
-    doc = nlp(text)
+def get_bio_tags(text, entities):
     bio_tags = []
-    for token in doc:
-        if token.ent_iob_ == "O":
-            bio_tags.append((token.text, "O"))
-        else:
-            bio_tags.append((token.text, f"{token.ent_iob_}-{token.ent_type_}"))
+    # 初始化所有token为O
+    tokens = text.split()
+    for token in tokens:
+        bio_tags.append((token, "O"))
+    
+    # 标记实体的B/I标签
+    for ent in entities:
+        ent_tokens = ent["text"].split()
+        for i, token in enumerate(ent_tokens):
+            for j, (t, _) in enumerate(bio_tags):
+                if t == token:
+                    if i == 0:
+                        bio_tags[j] = (t, f"B-{ent['label']}")
+                    else:
+                        bio_tags[j] = (t, f"I-{ent['label']}")
     return bio_tags
 
 def highlight_entities(text, entities):
-    sorted_entities = sorted(entities, key=lambda x: x["start"], reverse=True)
-    for ent in sorted_entities:
+    for ent in entities:
         label = ent["label"]
         color_map = {
             "PERSON": "#FFB3BA",
             "ORG": "#BAFFC9",
             "GPE": "#BAE1FF",
-            "LOC": "#FFFFBA",
             "PRODUCT": "#FFD9B3"
         }
         color = color_map.get(label, "#E0E0E0")
@@ -65,19 +69,16 @@ def highlight_entities(text, entities):
         text = text[:ent["start"]] + html + text[ent["end"]:]
     return text
 
-# ---------------------- 模块2：简单关系抽取 ----------------------
+# ---------------------- 简单关系抽取 ----------------------
 def extract_relations(text, entities):
-    doc = nlp(text)
     relations = []
-    entity_spans = {ent["text"]: (ent["start"], ent["end"]) for ent in entities}
-    entity_texts = list(entity_spans.keys())
-    
+    entity_texts = [ent["text"] for ent in entities]
     if len(entity_texts) < 2:
         return relations
     
     relation_patterns = {
-        "founder": ["founder of", "created by", "founded by"],
-        "located in": ["located in", "based in", "headquartered in"],
+        "founder": ["founded", "founder of", "created by"],
+        "located in": ["in", "located in", "based in"],
         "works at": ["works at", "employed by", "at"]
     }
     
@@ -87,14 +88,14 @@ def extract_relations(text, entities):
                 continue
             subj = entity_texts[i]
             obj = entity_texts[j]
-            subj_end = entity_spans[subj][1]
-            obj_start = entity_spans[obj][0]
-            
-            if subj_end < obj_start:
-                middle_text = text[subj_end:obj_start].strip()
+            # 简单判断实体顺序
+            subj_idx = text.find(subj)
+            obj_idx = text.find(obj)
+            if subj_idx < obj_idx:
+                middle_text = text[subj_idx + len(subj):obj_idx].lower()
                 for rel, keywords in relation_patterns.items():
                     for kw in keywords:
-                        if kw in middle_text.lower():
+                        if kw in middle_text:
                             relations.append({
                                 "subject": subj,
                                 "predicate": rel,
@@ -102,7 +103,7 @@ def extract_relations(text, entities):
                             })
     return relations
 
-# ---------------------- 模块3：知识图谱可视化 ----------------------
+# ---------------------- 知识图谱可视化 ----------------------
 def build_knowledge_graph(relations, entities):
     net = Network(notebook=False, height="600px", width="100%", bgcolor="#222222", font_color="white")
     
@@ -110,7 +111,6 @@ def build_knowledge_graph(relations, entities):
         "PERSON": "#FFB3BA",
         "ORG": "#BAFFC9",
         "GPE": "#BAE1FF",
-        "LOC": "#FFFFBA",
         "PRODUCT": "#FFD9B3"
     }
     node_labels = set()
@@ -160,19 +160,18 @@ with tab1:
     show_bio = st.checkbox("开启查看底层标注模式（BIO）", value=False, key="bio_check")
     
     if st.button("开始识别", key="ner_btn"):
-        with st.spinner("正在识别实体..."):
-            entities = get_ner_entities(text_input)
-            st.subheader("识别结果（高亮实体）")
-            st.markdown(highlight_entities(text_input, entities), unsafe_allow_html=True)
-            
-            if show_bio:
-                st.subheader("BIO标注结果")
-                bio_tags = get_bio_tags(text_input)
-                bio_text = " ".join([f"{token} ({tag})" for token, tag in bio_tags])
-                st.code(bio_text)
-            
-            st.subheader("实体列表")
-            st.dataframe(pd.DataFrame(entities))
+        entities = get_ner_entities(text_input)
+        st.subheader("识别结果（高亮实体）")
+        st.markdown(highlight_entities(text_input, entities), unsafe_allow_html=True)
+        
+        if show_bio:
+            st.subheader("BIO标注结果")
+            bio_tags = get_bio_tags(text_input, entities)
+            bio_text = " ".join([f"{token} ({tag})" for token, tag in bio_tags])
+            st.code(bio_text)
+        
+        st.subheader("实体列表")
+        st.dataframe(pd.DataFrame(entities))
 
 # ---------------------- 模块2：实体关系抽取 ----------------------
 with tab2:
@@ -187,18 +186,17 @@ with tab2:
     )
     
     if st.button("抽取关系", key="rel_btn"):
-        with st.spinner("正在抽取关系..."):
-            entities = get_ner_entities(text_input2)
-            relations = extract_relations(text_input2, entities)
-            
-            st.subheader("实体列表")
-            st.dataframe(pd.DataFrame(entities))
-            
-            st.subheader("关系抽取结果")
-            if relations:
-                st.dataframe(pd.DataFrame(relations))
-            else:
-                st.info("未抽取到实体间关系，请尝试包含明确关系词的句子（如 'founded by', 'located in'）")
+        entities = get_ner_entities(text_input2)
+        relations = extract_relations(text_input2, entities)
+        
+        st.subheader("实体列表")
+        st.dataframe(pd.DataFrame(entities))
+        
+        st.subheader("关系抽取结果")
+        if relations:
+            st.dataframe(pd.DataFrame(relations))
+        else:
+            st.info("未抽取到实体间关系，请尝试包含明确关系词的句子（如 'founded by', 'located in'）")
 
 # ---------------------- 模块3：知识图谱可视化 ----------------------
 with tab3:
@@ -213,15 +211,14 @@ with tab3:
     )
     
     if st.button("生成知识图谱", key="kb_btn"):
-        with st.spinner("正在生成知识图谱..."):
-            entities = get_ner_entities(text_input3)
-            relations = extract_relations(text_input3, entities)
-            
-            if not relations:
-                st.warning("未抽取到实体间关系，图谱将仅显示实体节点")
-            
-            html_content = build_knowledge_graph(relations, entities)
-            components.html(html_content, height=600, scrolling=True)
+        entities = get_ner_entities(text_input3)
+        relations = extract_relations(text_input3, entities)
+        
+        if not relations:
+            st.warning("未抽取到实体间关系，图谱将仅显示实体节点")
+        
+        html_content = build_knowledge_graph(relations, entities)
+        components.html(html_content, height=600, scrolling=True)
 
 # ---------------------- 页脚 ----------------------
 st.markdown("---")
