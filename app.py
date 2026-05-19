@@ -1,8 +1,10 @@
 import streamlit as st
 import spacy
+from spacy.cli import download
 import pandas as pd
 from pyvis.network import Network
 import streamlit.components.v1 as components
+import os
 
 # ---------------------- 页面配置 ----------------------
 st.set_page_config(
@@ -11,10 +13,15 @@ st.set_page_config(
     layout="wide"
 )
 
-# ---------------------- 加载模型 ----------------------
+# ---------------------- 自动下载spaCy模型 ----------------------
 @st.cache_resource
 def load_spacy_model():
-    nlp = spacy.load("en_core_web_sm")
+    # 自动下载模型，避免安装失败
+    try:
+        nlp = spacy.load("en_core_web_sm")
+    except OSError:
+        download("en_core_web_sm")
+        nlp = spacy.load("en_core_web_sm")
     return nlp
 
 nlp = load_spacy_model()
@@ -43,7 +50,6 @@ def get_bio_tags(text):
     return bio_tags
 
 def highlight_entities(text, entities):
-    # 按实体位置倒序处理，避免替换时偏移
     sorted_entities = sorted(entities, key=lambda x: x["start"], reverse=True)
     for ent in sorted_entities:
         label = ent["label"]
@@ -69,7 +75,6 @@ def extract_relations(text, entities):
     if len(entity_texts) < 2:
         return relations
     
-    # 简单规则匹配关系（示例）
     relation_patterns = {
         "founder": ["founder of", "created by", "founded by"],
         "located in": ["located in", "based in", "headquartered in"],
@@ -101,7 +106,6 @@ def extract_relations(text, entities):
 def build_knowledge_graph(relations, entities):
     net = Network(notebook=False, height="600px", width="100%", bgcolor="#222222", font_color="white")
     
-    # 添加实体节点
     entity_color_map = {
         "PERSON": "#FFB3BA",
         "ORG": "#BAFFC9",
@@ -120,7 +124,6 @@ def build_knowledge_graph(relations, entities):
             )
             node_labels.add(ent["text"])
     
-    # 添加关系边
     for rel in relations:
         net.add_edge(
             rel["subject"], 
@@ -130,7 +133,6 @@ def build_knowledge_graph(relations, entities):
             color="#FFFFFF"
         )
     
-    # 保存为HTML
     net.save_graph("kb_graph.html")
     return open("kb_graph.html", "r", encoding="utf-8").read()
 
@@ -152,9 +154,10 @@ with tab1:
     text_input = st.text_area(
         "请输入英文句子：",
         value="Steve Jobs founded Apple Inc. in Cupertino.",
-        height=150
+        height=150,
+        key="ner_text"
     )
-    show_bio = st.checkbox("开启查看底层标注模式（BIO）", value=False)
+    show_bio = st.checkbox("开启查看底层标注模式（BIO）", value=False, key="bio_check")
     
     if st.button("开始识别", key="ner_btn"):
         with st.spinner("正在识别实体..."):
